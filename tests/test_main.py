@@ -9,22 +9,28 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import main
 
-GOOD_ARGS = [
-    "--package", "junit:junit:4.13.2",
-    "--repo", "https://repo1.maven.org/maven2",
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+SIMPLE_FILE = os.path.join(DATA_DIR, "simple.txt")
+CYCLE_FILE = os.path.join(DATA_DIR, "cycle.txt")
+BAD_FILE = os.path.join(DATA_DIR, "bad.txt")
+
+REAL_ARGS = [
+    "--package", "x:app:1.0",
+    "--repo", "https://repo.org",
     "--output", "graph.svg",
 ]
 
-POM_TEXT = """<project>
+POM_FILES = {
+    "https://repo.org/x/app/1.0/app-1.0.pom": """<project>
   <dependencies>
     <dependency>
-      <groupId>org.hamcrest</groupId>
-      <artifactId>hamcrest-core</artifactId>
-      <version>1.3</version>
+      <groupId>x</groupId><artifactId>lib</artifactId><version>2.0</version>
     </dependency>
   </dependencies>
-</project>
-"""
+</project>""",
+    "https://repo.org/x/lib/2.0/lib-2.0.pom": "<project/>",
+}
+
 
 def run_main(args):
     out = io.StringIO()
@@ -34,28 +40,75 @@ def run_main(args):
     return code, out.getvalue(), err.getvalue()
 
 
-class TestDependencies(unittest.TestCase):
+def make_test_args(path, package, *extra):
+    args = ["--package", package, "--repo", path, "--mode", "test",
+            "--output", "graph.svg"]
+    return args + list(extra)
 
-    def test_print_dependencies(self):
-        """Выводятся все прямые зависимости пакета."""
-        with mock.patch("maven.download_text", return_value=POM_TEXT):
-            code, out, _ = run_main(GOOD_ARGS)
-        self.assertEqual(code, 0)
-        self.assertIn("Прямые зависимости пакета junit:junit:4.13.2:", out)
-        self.assertIn("org.hamcrest:hamcrest-core:1.3", out)
 
-    def test_no_dependencies(self):
-        """Сообщение, если у пакета нет зависимостей."""
-        with mock.patch("maven.download_text", return_value="<project/>"):
-            code, out, _ = run_main(GOOD_ARGS)
+class TestTestMode(unittest.TestCase):
+
+    def test_simple_graph(self):
+        """Выводится весь граф с транзитивными зависимостями."""
+        code, out, _ = run_main(make_test_args(SIMPLE_FILE, "A"))
         self.assertEqual(code, 0)
-        self.assertIn("нет зависимостей", out)
+        self.assertEqual(out, "Граф зависимостей пакета A:\n"
+                              "A -> B, C\n"
+                              "B -> D\n"
+                              "C -> D, E\n"
+                              "D -> нет зависимостей\n"
+                              "E -> F\n"
+                              "F -> нет зависимостей\n")
+
+    def test_cycle(self):
+        """Граф с циклами выводится без зацикливания."""
+        code, out, _ = run_main(make_test_args(CYCLE_FILE, "A"))
+        self.assertEqual(code, 0)
+        self.assertIn("C -> A, D", out)
+        self.assertIn("D -> D", out)
+
+    def test_filter(self):
+        """Пакеты с подстрокой фильтра не попадают в граф."""
+        args = make_test_args(SIMPLE_FILE, "A", "--filter", "E")
+        code, out, _ = run_main(args)
+        self.assertEqual(code, 0)
+        self.assertIn("C -> D\n", out)
+        self.assertNotIn("E", out.replace("Граф", ""))
+
+    def test_package_not_in_file(self):
+        """Пакета нет в файле тестового репозитория."""
+        code, _, err = run_main(make_test_args(SIMPLE_FILE, "Z"))
+        self.assertEqual(code, 1)
+        self.assertIn("не найден в тестовом репозитории", err)
+
+    def test_bad_file(self):
+        """Ошибка в файле тестового репозитория."""
+        code, _, err = run_main(make_test_args(BAD_FILE, "A"))
+        self.assertEqual(code, 1)
+        self.assertIn("строка 2", err)
+
+    def test_bad_test_name(self):
+        """В режиме test имя пакета - большие латинские буквы."""
+        code, _, err = run_main(make_test_args(SIMPLE_FILE, "a"))
+        self.assertEqual(code, 1)
+        self.assertIn("больших латинских букв", err)
+
+
+class TestRealMode(unittest.TestCase):
+
+    def test_real_graph(self):
+        """Граф строится по файлам POM из репозитория."""
+        with mock.patch("maven.download_text", side_effect=POM_FILES.get):
+            code, out, _ = run_main(REAL_ARGS)
+        self.assertEqual(code, 0)
+        self.assertIn("x:app:1.0 -> x:lib:2.0", out)
+        self.assertIn("x:lib:2.0 -> нет зависимостей", out)
 
     def test_download_error(self):
         """Ошибка загрузки выводится как ошибка программы."""
         error = ValueError("не удалось загрузить файл")
         with mock.patch("maven.download_text", side_effect=error):
-            code, out, err = run_main(GOOD_ARGS)
+            code, out, err = run_main(REAL_ARGS)
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertIn("не удалось загрузить", err)
@@ -86,12 +139,6 @@ class TestBadParams(unittest.TestCase):
                 "--output", "g.svg"]
         self.check_error(args, "groupId:artifactId:version")
 
-    def test_package_with_empty_part(self):
-        """Имя пакета с пустой частью."""
-        args = ["--package", "junit::4.13.2", "--repo", "https://x.org",
-                "--output", "g.svg"]
-        self.check_error(args, "groupId:artifactId:version")
-
     def test_no_repo(self):
         """Не задан репозиторий."""
         args = ["--package", "a:b:1", "--output", "g.svg"]
@@ -105,15 +152,7 @@ class TestBadParams(unittest.TestCase):
 
     def test_missing_test_file(self):
         """Файл тестового репозитория не существует."""
-        args = ["--package", "A", "--repo", "no_such_file.txt",
-                "--mode", "test", "--output", "g.svg"]
-        self.check_error(args, "не найден")
-
-    def test_test_mode_not_supported(self):
-        """Режим test пока не поддерживается."""
-        args = ["--package", "A", "--repo", __file__,
-                "--mode", "test", "--output", "g.svg"]
-        self.check_error(args, "пока не поддерживается")
+        self.check_error(make_test_args("no_such_file.txt", "A"), "не найден")
 
     def test_bad_mode(self):
         """Неизвестный режим работы."""

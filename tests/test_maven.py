@@ -53,6 +53,67 @@ POM_WITHOUT_DEPENDENCIES = """<project>
 </project>
 """
 
+POM_WITH_PROPERTIES = """<project>
+  <groupId>org.example</groupId>
+  <version>2.5</version>
+  <properties>
+    <hamcrestVersion>1.3</hamcrestVersion>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.hamcrest</groupId>
+      <artifactId>hamcrest-core</artifactId>
+      <version>${hamcrestVersion}</version>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>part</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.unknown</groupId>
+      <artifactId>lib</artifactId>
+      <version>${unknown.version}</version>
+    </dependency>
+  </dependencies>
+</project>
+"""
+
+POM_WITH_SCOPES = """<project>
+  <dependencies>
+    <dependency>
+      <groupId>a</groupId>
+      <artifactId>compile</artifactId>
+      <version>1</version>
+    </dependency>
+    <dependency>
+      <groupId>a</groupId>
+      <artifactId>runtime</artifactId>
+      <version>1</version>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>a</groupId>
+      <artifactId>test</artifactId>
+      <version>1</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>a</groupId>
+      <artifactId>provided</artifactId>
+      <version>1</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>a</groupId>
+      <artifactId>optional</artifactId>
+      <version>1</version>
+      <optional>true</optional>
+    </dependency>
+  </dependencies>
+</project>
+"""
+
 
 class TestMakePomUrl(unittest.TestCase):
 
@@ -95,6 +156,31 @@ class TestParseDependencies(unittest.TestCase):
         with self.assertRaises(ValueError):
             maven.parse_dependencies("<project><dependencies>")
 
+    def test_properties(self):
+        """Переменные ${...} заменяются значениями из файла POM."""
+        result = maven.parse_dependencies(POM_WITH_PROPERTIES)
+        self.assertEqual(result, ["org.hamcrest:hamcrest-core:1.3",
+                                  "org.example:part:2.5",
+                                  "org.unknown:lib:${unknown.version}"])
+
+    def test_scopes(self):
+        """Зависимости test, provided и optional не учитываются."""
+        result = maven.parse_dependencies(POM_WITH_SCOPES)
+        self.assertEqual(result, ["a:compile:1", "a:runtime:1"])
+
+
+class TestCanDownload(unittest.TestCase):
+
+    def test_known_version(self):
+        """Обычная версия известна."""
+        self.assertTrue(maven.can_download("junit:junit:4.13.2"))
+
+    def test_unknown_version(self):
+        """Без версии, с переменной или с диапазоном POM не скачать."""
+        self.assertFalse(maven.can_download("junit:junit"))
+        self.assertFalse(maven.can_download("a:b:${v}"))
+        self.assertFalse(maven.can_download("a:b:[1.0,2.0)"))
+
 
 class TestDownload(unittest.TestCase):
 
@@ -114,6 +200,14 @@ class TestDownload(unittest.TestCase):
                                                    "x:y:1.0")
         download.assert_called_once_with("https://repo.org/x/y/1.0/y-1.0.pom")
         self.assertEqual(result, ["a.b:c:2.0"])
+
+    def test_unknown_version_not_downloaded(self):
+        """Пакет с неизвестной версией не скачивается."""
+        with mock.patch("maven.download_text") as download:
+            result = maven.get_direct_dependencies("https://repo.org",
+                                                   "x:y")
+        download.assert_not_called()
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":

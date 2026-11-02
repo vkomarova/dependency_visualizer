@@ -9,18 +9,29 @@
 - **Этап 2.** Сбор данных: программа скачивает из репозитория Maven
   файл POM заданного пакета и выводит на экран все его прямые
   зависимости.
+- **Этап 3.** Основные операции: программа строит граф зависимостей
+  с учетом транзитивности алгоритмом BFS без рекурсии, исключает пакеты
+  по подстроке фильтра, корректно обрабатывает циклические зависимости
+  и поддерживает режим тестирования с файлом тестового репозитория.
 
 ## Структура проекта
 
 ```
 depviz/
-├── src/main.py           параметры командной строки и вывод результата
-├── src/maven.py          получение прямых зависимостей из репозитория Maven
-├── tests/test_main.py    тесты параметров и вывода
-├── tests/test_maven.py   тесты получения зависимостей
-├── run.sh                запуск в Linux / macOS
-├── run.bat               запуск в Windows
-├── Makefile              команды запуска и тестов
+├── src/main.py               параметры командной строки и вывод графа
+├── src/maven.py              прямые зависимости из репозитория Maven
+├── src/repo_file.py          чтение файла тестового репозитория
+├── src/graph.py              построение графа алгоритмом BFS
+├── tests/test_main.py        тесты параметров и вывода графа
+├── tests/test_maven.py       тесты получения зависимостей Maven
+├── tests/test_repo_file.py   тесты чтения тестового репозитория
+├── tests/test_graph.py       тесты построения графа
+├── tests/data/simple.txt     тестовый репозиторий без циклов
+├── tests/data/cycle.txt      тестовый репозиторий с циклами
+├── tests/data/bad.txt        тестовый репозиторий с ошибкой
+├── run.sh                    запуск в Linux / macOS
+├── run.bat                   запуск в Windows
+├── Makefile                  команды запуска и тестов
 ├── README.md
 └── .gitignore
 ```
@@ -31,29 +42,65 @@ depviz/
 
 | Опция       | Описание                                         | Обязательна |
 |-------------|--------------------------------------------------|-------------|
-| `--package` | Имя пакета в виде `groupId:artifactId:version`   | да          |
-| `--repo`    | URL репозитория или путь к файлу тестового репозитория | да    |
+| `--package` | Имя пакета: в режиме `real` — `groupId:artifactId:version`, в режиме `test` — большие латинские буквы | да |
+| `--repo`    | URL репозитория (`real`) или путь к файлу тестового репозитория (`test`) | да |
 | `--mode`    | Режим работы с репозиторием: `real` или `test`   | нет (`real`) |
 | `--output`  | Имя файла с изображением графа (`.svg`)          | да          |
-| `--filter`  | Подстрока для фильтрации пакетов                 | нет         |
+| `--filter`  | Подстрока: пакеты, в имени которых она есть, не учитываются | нет |
 
-Параметры `--output` и `--filter` пока только проверяются,
-а использоваться будут на следующих этапах.
+Параметр `--output` пока только проверяется, файл изображения
+будет создаваться на этапе 5.
 
-### Как программа получает зависимости
+### Построение графа (алгоритм BFS)
+
+Граф хранится как словарь: имя пакета → список его прямых зависимостей.
+
+1. В очередь кладется анализируемый пакет.
+2. Из начала очереди берётся пакет. Если он уже есть в графе,
+   он пропускается — так обрабатываются циклические зависимости.
+3. Для пакета находятся прямые зависимости. Зависимости, в имени которых
+   есть подстрока `--filter`, отбрасываются.
+4. Пакет и его зависимости записываются в граф, а зависимости
+   добавляются в конец очереди.
+5. Шаги 2–4 повторяются, пока очередь не опустеет.
+
+Обход сделан циклом `while` с очередью, без рекурсии. Фильтр
+применяется к зависимостям: сам анализируемый пакет не исключается.
+
+### Режим real: зависимости из репозитория Maven
 
 1. Из имени пакета и URL репозитория составляется адрес файла POM.
-   Точки в `groupId` заменяются на `/`. Например, для пакета
-   `junit:junit:4.13.2` и репозитория `https://repo1.maven.org/maven2`
-   получается адрес
-   `https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.pom`.
-2. Файл POM скачивается модулем `urllib` из стандартной библиотеки.
-3. Файл читается как XML модулем `xml.etree` из стандартной библиотеки.
-4. Прямые зависимости — это теги `project/dependencies/dependency`.
-   Раздел `dependencyManagement` не учитывается: там только
-   рекомендуемые версии, а не зависимости пакета.
-5. Каждая зависимость выводится как `groupId:artifactId:version`.
-   Если версия в POM не указана, выводится `groupId:artifactId`.
+   Например, для `junit:junit:4.13.2` и `https://repo1.maven.org/maven2`
+   это `https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.pom`.
+2. Файл скачивается модулем `urllib` и читается модулем `xml.etree`
+   (оба из стандартной библиотеки Python).
+3. Прямые зависимости — теги `project/dependencies/dependency`.
+   Раздел `dependencyManagement` не учитывается.
+4. Переменные вида `${hamcrestVersion}` заменяются значениями из раздела
+   `<properties>` этого же файла. Также известны `${project.groupId}`
+   и `${project.version}`.
+5. Не учитываются зависимости со `<scope>test</scope>`,
+   `<scope>provided</scope>` и `<optional>true</optional>`: Maven не
+   передаёт их дальше по цепочке, они не нужны для работы пакета.
+6. Если версия зависимости неизвестна (не указана, осталась переменной
+   или задана диапазоном), её файл POM не скачивается, и в графе у неё
+   нет зависимостей.
+
+### Режим test: файл тестового репозитория
+
+Каждая строка описывает пакет и его прямые зависимости. Имя пакета
+и зависимости разделяются двоеточием, зависимости — пробелами.
+Имена — большие латинские буквы. Пустые строки пропускаются.
+Пакет, который не описан в файле, считается пакетом без зависимостей.
+
+Пример (`tests/data/cycle.txt`):
+
+```
+A: B
+B: C
+C: A D
+D: D
+```
 
 ### Обработка ошибок
 
@@ -62,15 +109,17 @@ depviz/
 
 | Параметр    | Когда выводится ошибка |
 |-------------|------------------------|
-| `--package` | имя не задано, пустое или содержит пробелы; в режиме `real` записано не как `groupId:artifactId:version` |
-| `--mode`    | значение не `real` и не `test`; режим `test` пока не поддерживается |
+| `--package` | имя не задано, пустое или содержит пробелы; в режиме `real` записано не как `groupId:artifactId:version`; в режиме `test` состоит не из больших латинских букв или его нет в файле |
+| `--mode`    | значение не `real` и не `test` |
 | `--repo`    | не задан; в режиме `real` не начинается с `http://` или `https://`; в режиме `test` файл не существует |
 | `--output`  | имя не задано, пустое или не оканчивается на `.svg` |
 | `--filter`  | задан, но состоит только из пробелов |
-| загрузка    | файл POM не удалось скачать (нет сети, пакет не найден) |
-| чтение      | файл POM содержит ошибки XML |
+| файл POM    | не удалось скачать или в нём ошибки XML |
+| тестовый файл | строка без двоеточия или имя не из больших латинских букв (с номером строки) |
 
-### Функции в `src/main.py`
+### Функции
+
+`src/main.py`:
 
 | Функция | Описание |
 |---------|----------|
@@ -82,29 +131,53 @@ depviz/
 | `check_output(output)` | проверяет имя файла изображения |
 | `check_filter(text)` | проверяет подстроку фильтра |
 | `check_params(params)` | вызывает все проверки по очереди |
-| `get_dependencies(params)` | получает прямые зависимости пакета |
-| `print_dependencies(package, dependencies)` | выводит зависимости на экран |
+| `make_real_loader(repo_url)` | создаёт функцию получения зависимостей из Maven |
+| `make_test_loader(path, package)` | создаёт функцию получения зависимостей из тестового файла |
+| `make_loader(params)` | выбирает способ получения зависимостей по режиму |
+| `print_graph(package, dependency_graph)` | выводит граф на экран |
 | `main(args)` | точка входа программы |
 
-### Функции в `src/maven.py`
+`src/graph.py`:
+
+| Функция | Описание |
+|---------|----------|
+| `is_filtered(name, filter_text)` | проверяет, есть ли подстрока фильтра в имени |
+| `build_graph(start, get_dependencies, filter_text)` | строит граф алгоритмом BFS |
+
+`src/maven.py`:
 
 | Функция | Описание |
 |---------|----------|
 | `make_pom_url(repo, package)` | составляет URL файла POM |
 | `download_text(url)` | скачивает файл по URL |
 | `remove_namespaces(root)` | убирает пространство имён из тегов XML |
-| `make_dependency_name(dependency)` | составляет имя зависимости из тега |
+| `read_properties(root)` | читает переменные из раздела `<properties>` |
+| `resolve_value(text, properties)` | подставляет значение переменной `${...}` |
+| `is_needed(dependency)` | отбрасывает зависимости test, provided и optional |
+| `make_dependency_name(dependency, properties)` | составляет имя зависимости |
 | `parse_dependencies(pom_text)` | находит прямые зависимости в POM |
+| `can_download(package)` | проверяет, известна ли версия пакета |
 | `get_direct_dependencies(repo, package)` | скачивает POM и возвращает зависимости |
+
+`src/repo_file.py`:
+
+| Функция | Описание |
+|---------|----------|
+| `is_test_name(name)` | проверяет, что имя — большие латинские буквы |
+| `check_test_name(name, line_number)` | проверяет имя из строки файла |
+| `parse_line(line, line_number)` | разбирает одну строку файла |
+| `parse_test_repo(text)` | разбирает весь файл в словарь |
+| `load_test_repo(path)` | читает файл тестового репозитория |
+| `get_test_dependencies(repo, name)` | возвращает зависимости пакета из файла |
 
 ## Сборка и запуск тестов
 
 Запуск программы:
 
 ```
-./run.sh --package <groupId:artifactId:version> --repo <url> --output <файл.svg>
-run.bat --package <groupId:artifactId:version> --repo <url> --output <файл.svg>
-make run ARGS="--package <groupId:artifactId:version> --repo <url> --output <файл.svg>"
+./run.sh --package <имя> --repo <url или файл> [--mode test] --output <файл.svg> [--filter <подстрока>]
+run.bat --package <имя> --repo <url или файл> [--mode test] --output <файл.svg> [--filter <подстрока>]
+make run ARGS="--package <имя> --repo <url или файл> --output <файл.svg>"
 ```
 
 Запуск тестов:
@@ -121,15 +194,79 @@ python3 -m unittest discover -s tests -v
 
 ## Примеры использования
 
-Прямые зависимости пакета JUnit:
+### Режим test
+
+Граф без циклов, с общей зависимостью D у пакетов B и C
+(`tests/data/simple.txt`):
+
+```
+$ ./run.sh --package A --repo tests/data/simple.txt --mode test --output graph.svg
+Граф зависимостей пакета A:
+A -> B, C
+B -> D
+C -> D, E
+D -> нет зависимостей
+E -> F
+F -> нет зависимостей
+```
+
+Граф с циклом A → B → C → A и зависимостью D от самого себя
+(`tests/data/cycle.txt`):
+
+```
+$ ./run.sh --package A --repo tests/data/cycle.txt --mode test --output graph.svg
+Граф зависимостей пакета A:
+A -> B
+B -> C
+C -> A, D
+D -> D
+```
+
+Фильтр: пакет E не учитывается, поэтому в граф не попадает и F,
+которая нужна только пакету E:
+
+```
+$ ./run.sh --package A --repo tests/data/simple.txt --mode test --output graph.svg --filter E
+Граф зависимостей пакета A:
+A -> B, C
+B -> D
+C -> D
+D -> нет зависимостей
+```
+
+Фильтр внутри цикла:
+
+```
+$ ./run.sh --package C --repo tests/data/cycle.txt --mode test --output graph.svg --filter D
+Граф зависимостей пакета C:
+C -> A
+A -> B
+B -> C
+```
+
+Ошибки тестового режима:
+
+```
+$ ./run.sh --package A --repo tests/data/bad.txt --mode test --output graph.svg
+Ошибка: строка 2: имя пакета 'b' должно состоять из больших латинских букв
+
+$ ./run.sh --package Z --repo tests/data/simple.txt --mode test --output graph.svg
+Ошибка: пакет Z не найден в тестовом репозитории
+
+$ ./run.sh --package a --repo tests/data/simple.txt --mode test --output graph.svg
+Ошибка: в режиме test имя пакета должно состоять из больших латинских букв
+```
+
+### Режим real
 
 ```
 $ ./run.sh --package junit:junit:4.13.2 --repo https://repo1.maven.org/maven2 --output graph.svg
-Прямые зависимости пакета junit:junit:4.13.2:
-org.hamcrest:hamcrest-core:1.3
+Граф зависимостей пакета junit:junit:4.13.2:
+junit:junit:4.13.2 -> org.hamcrest:hamcrest-core:1.3
+org.hamcrest:hamcrest-core:1.3 -> нет зависимостей
 ```
 
-Примеры ошибок:
+Ошибки режима real:
 
 ```
 $ ./run.sh --package junit:junit --repo https://repo1.maven.org/maven2 --output graph.svg
@@ -137,19 +274,4 @@ $ ./run.sh --package junit:junit --repo https://repo1.maven.org/maven2 --output 
 
 $ ./run.sh --package junit:junit:0.0 --repo https://repo1.maven.org/maven2 --output graph.svg
 Ошибка: не удалось загрузить https://repo1.maven.org/maven2/junit/junit/0.0/junit-0.0.pom (HTTP Error 404: Not Found)
-
-$ ./run.sh --package a:b:1 --repo ftp://example.org --output graph.svg
-Ошибка: URL репозитория должен начинаться с http:// или https://
-
-$ ./run.sh --package A --repo README.md --mode test --output graph.svg
-Ошибка: режим test пока не поддерживается
-
-$ ./run.sh --package a:b:1 --repo https://example.org --mode abc --output graph.svg
-Ошибка: режим (--mode) должен быть real или test
-
-$ ./run.sh --package a:b:1 --repo https://example.org --output graph.png
-Ошибка: файл изображения должен иметь расширение .svg
-
-$ ./run.sh --package a:b:1 --repo https://example.org --output graph.svg --filter " "
-Ошибка: подстрока фильтра (--filter) не может быть пустой
 ```
