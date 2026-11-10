@@ -1,5 +1,5 @@
 import urllib.request
-import xml.etree.ElementTree as ElementTree
+import xml.etree.ElementTree as element_tree
 
 TIMEOUT_SECONDS = 30
 PACKAGE_PARTS = 3
@@ -58,8 +58,8 @@ def make_dependency_name(dependency, properties):
 
 def parse_dependencies(pom_text):
     try:
-        root = ElementTree.fromstring(pom_text)
-    except ElementTree.ParseError:
+        root = element_tree.fromstring(pom_text)
+    except element_tree.ParseError:
         raise ValueError("файл POM содержит ошибки XML")
     remove_namespaces(root)
     properties = read_properties(root)
